@@ -100,6 +100,7 @@ typedef struct connect_data {
 
 qemu_irq uart0_irq;
 qemu_irq uart1_irq;
+qemu_irq uart2_irq;
 
 void *connection_handler(void *connect);
 void *gdb_socket_thread(void *dummy);
@@ -150,6 +151,7 @@ enum {
 
 enum {
     ESP32_UART_BITS(CONF1, RXFIFO_FULL, 0, 7),
+    ESP32_UART_BITS(CONF1, TXFIFO_EMPTY, 8, 7), //TXFIFO support on UART2
 };
 
 #define ESP32_UART_GET(s, _reg, _field) \
@@ -207,7 +209,7 @@ static void esp32_serial_irq_update(Esp32SerialState *s)
     s->reg[ESP32_UART_INT_ST] |= s->reg[ESP32_UART_INT_RAW];
     //fprintf(stderr,"CHECKING IRQ\n");
 
-    if ((s->uart_num==0 || s->uart_num==1) && (s->reg[ESP32_UART_INT_ST] & s->reg[ESP32_UART_INT_ENA])) {
+    if ((s->uart_num==0 || s->uart_num==1 || s->uart_num==2) && (s->reg[ESP32_UART_INT_ST] & s->reg[ESP32_UART_INT_ENA])) {
         //fprintf(stderr,"RAISING IRQ\n");
         if (s->uart_num==0) {
             //fprintf(stderr,"RAISING IRQ\n");
@@ -216,9 +218,9 @@ static void esp32_serial_irq_update(Esp32SerialState *s)
         else if (s->uart_num==1) {
            qemu_irq_raise(uart1_irq);
         }
-        else
-        {
-           qemu_irq_raise(s->irq);
+        else if (s->uart_num == 2) {
+	   //fprintf(stderr,"RAISING IRQ UART2\n");
+	   qemu_irq_raise(uart2_irq);
         }
     } else {
         if (s->uart_num==0) {
@@ -228,10 +230,9 @@ static void esp32_serial_irq_update(Esp32SerialState *s)
         else if (s->uart_num==1) {
            qemu_irq_lower(uart1_irq);
         }
-
-        else
-        {
-           qemu_irq_lower(s->irq);
+        else if (s->uart_num == 2) {
+	   //fprintf(stderr,"Lower IRQ UART2 INT_ST %x INT_ENA %x\n", s->reg[ESP32_UART_INT_ST], s->reg[ESP32_UART_INT_ENA]);
+	   qemu_irq_lower(uart2_irq);
         }
     }
 
@@ -274,6 +275,10 @@ static uint64_t esp32_serial_read(void *opaque, hwaddr addr,
             }
             else if (s->uart_num==1) {
               qemu_irq_lower(uart1_irq);
+            }
+            else if (s->uart_num == 2) {
+              //fprintf(stderr,"read1: lOWER IRQ UART2i INT_RAW %x\n", s->reg[ESP32_UART_INT_RAW]);
+              qemu_irq_lower(uart2_irq);
             }
             else
             {
@@ -379,6 +384,10 @@ static void esp32_serial_int_clr(Esp32SerialState *s, hwaddr addr,
                                    uint64_t val, unsigned size)
 {
     s->reg[ESP32_UART_INT_ST] &= ~val & 0x1ff;
+    if (val == ESP32_UART_INT_TXFIFO_EMPTY) {
+        //fprintf(stderr, "UART %s: clear ESP32_UART_INT_TXFIFO_EMPTY %d\n", __FUNCTION__, val);
+        s->reg[ESP32_UART_INT_RAW] &= ~ESP32_UART_INT_TXFIFO_EMPTY;
+    }
     esp32_serial_irq_update(s);
 }
 
@@ -425,6 +434,11 @@ static void esp32_serial_set_conf1(Esp32SerialState *s, hwaddr addr,
        s->timeout_timer=timer_new_ns(QEMU_CLOCK_REALTIME, &esp_serial_timeout_cb, s);
        timer_mod_ns(s->timeout_timer,10000000000);  // WAS one 0 less
         
+    }
+
+    if (ESP32_UART_GET(s, CONF1, TXFIFO_EMPTY)) {
+        s->reg[ESP32_UART_INT_RAW] |= ESP32_UART_INT_TXFIFO_EMPTY;
+        esp32_serial_rx_irq_update(s);
     }
 
     //if (ESP32_UART_GET(s, CONF1, RXFIFO_RST)) {
@@ -2403,6 +2417,12 @@ if (addr>=0x12000 && addr<0x13ffc) {
        case 0x190:
            printf("DPORT_PRO_UART1_INTR_MAP_REG %" PRIx64 "\n" ,val);  
            uart1_irq=PROcpu->env.irq_inputs[(int)val];
+           break;
+
+       case 0x194:
+           printf("DPORT_PRO_UART2_INTR_MAP_REG %" PRIx64 "\n" ,val);
+           uart2_irq=PROcpu->env.irq_inputs[(int)val];
+	   //printf("uart2_irq=%x\n", uart2_irq);
            break;
 
         case 0x48000:
