@@ -5,3 +5,4 @@ obj-y += esp32.o
 obj-y += MemoryMapped.o
 obj-y += esp32_sha.o
 obj-y += tmpbme280.o
+obj-y += ble_controller.o

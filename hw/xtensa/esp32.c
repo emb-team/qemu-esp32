@@ -101,8 +101,10 @@ typedef struct connect_data {
 qemu_irq uart0_irq;
 qemu_irq uart1_irq;
 qemu_irq uart2_irq;
+qemu_irq bt_host_tx_irq;
 
 void *connection_handler(void *connect);
+void *bt_socket_thread(void *);
 void *gdb_socket_thread(void *dummy);
 
 
@@ -1644,6 +1646,11 @@ static unsigned int pro_MMU_REG[0x2000]={0};
 
 static unsigned int app_MMU_REG[0x2000]={0};
 
+// Bluetooth memory range
+static unsigned int sim_BT_REG[0x200/4] = { 0 };
+static int16_t sim_BT_tx_len = 0;
+static int32_t sim_BT_tx_enable = 0x0001;
+
 bool nv_init_called=false;
 
 void memdump(uint32_t mem,uint32_t len);
@@ -1703,6 +1710,43 @@ void mapFlashToMem(uint32_t flash_start,uint32_t mem_addr,uint32_t len)
         }        
 }
 
+int esp_bt_host_tx(uint8_t *, uint16_t);
+
+int esp_bt_host_tx(uint8_t *buf, uint16_t len)
+{
+	uint8_t *p = (uint8_t *)sim_BT_REG;
+
+	if (!sim_BT_tx_enable) {
+		printf("BT: Something went wrong. sim_BT_tx_enable == 0! Abort...\n");
+		return -1;
+	}
+
+	memcpy(p, buf, len);
+	sim_BT_tx_len = len;
+	sim_BT_tx_enable = 0;
+
+	qemu_irq_raise(bt_host_tx_irq);
+
+	return 0;
+}
+
+static uint64_t esp_bt_read(void *opaque, hwaddr addr,
+        unsigned size)
+{
+	unsigned int off = addr-0x51000;
+
+	uint8_t *p = (uint8_t *)sim_BT_REG + off;
+	switch (size) {
+           case 1:
+		return *p;
+           case 2:
+		return *(uint16_t *)p;
+           case 4:
+		return *(uint32_t *)p;
+	}
+
+	return 0;
+}
 
 static uint64_t esp_io_read(void *opaque, hwaddr addr,
         unsigned size)
@@ -1745,6 +1789,11 @@ static uint64_t esp_io_read(void *opaque, hwaddr addr,
         }
         return(esp32->gpio_reg[gpio_num]);
 
+     }
+
+     //Bluetooth
+     if (addr>=0x51000 && addr+size<=0x51200) {
+     	return esp_bt_read(opaque, addr, size);
      }
 
     // Timer count reg
@@ -1890,6 +1939,11 @@ static uint64_t esp_io_read(void *opaque, hwaddr addr,
            return 0x40000000;
            break;
 
+	case 0x51200:
+           //printf("BT HOST RX LEN read %d\n", sim_BT_tx_len);
+           return sim_BT_tx_len;
+           break;
+
        // Handled by i2c 
        //case 0x5302c:
        //    printf(" I2C INTSTATUS 3ff5302c=%08X\n",0x0);
@@ -2001,9 +2055,28 @@ static uint64_t esp_io_read(void *opaque, hwaddr addr,
     return 0x0;
 }
 
+static uint64_t esp_bt_write(void *opaque, hwaddr addr,
+        uint64_t val, unsigned size)
+{
+	unsigned int off = addr-0x51000;
 
+	uint8_t *p = (uint8_t *)sim_BT_REG + off;
+	switch (size) {
+           case 1:
+		*p = (uint8_t) val;
+		break;
+           case 2:
+		*((uint16_t *)p) = (uint16_t) val;
+                break;
+           case 4:
+		*((uint32_t *)p) = (uint32_t) val;
+		break;
+	}
 
+	return 0;
+}
 
+int ble_controller_rx(uint8_t *, int);
 
 static void esp_io_write(void *opaque, hwaddr addr,
         uint64_t val, unsigned size)
@@ -2026,6 +2099,11 @@ MemoryRegion *system_memory = get_system_memory();
 
     }
 
+     // Bluetooth
+     if (addr>=0x51000 && addr+size<=0x51200) {
+	esp_bt_write(opaque, addr, val, size);
+	return;
+     }
 
 /* Flash MMU table for PRO CPU */
 //#define DPORT_PRO_FLASH_MMU_TABLE ((volatile uint32_t*) 0x3FF10000)
@@ -2394,6 +2472,11 @@ if (addr>=0x12000 && addr<0x13ffc) {
               }
            break;
 
+	case 0x114:
+		//printf("DPORT_PRO_BT_BB_INT_MAP_REG %" PRIx64 "\n" ,val);
+		//#define ETS_BT_BB_INTR_SOURCE                   4/**< interrupt of BT BB, level*/
+		bt_host_tx_irq=PROcpu->env.irq_inputs[(int)val];
+		break;
 
       case  0x164:
           printf("DPORT_PRO_CPU_INTR_FROM_CPU_0_MAP_REG %" PRIx64 "\n" ,val);
@@ -2472,6 +2555,20 @@ if (addr>=0x12000 && addr<0x13ffc) {
             fprintf(stderr,"%c",(char)val);
             break;
 
+       case 0x51200:
+           (void) ble_controller_rx((uint8_t *)sim_BT_REG, val);
+           (void) val;
+           break;
+       case 0x51204:
+           sim_BT_tx_enable = (uint32_t)val;
+           memset(sim_BT_REG, 0x0, sizeof(sim_BT_REG));
+           sim_BT_tx_len = 0;
+           break;
+       case 0x51400:
+           //printf("BT CONTROLLER CLEAR RX INTR request\n");
+           qemu_irq_lower(bt_host_tx_irq);
+           (void) val;
+           break;
        case 0x69000: 
            printf("EMAC_DMABUSMODE_REG %" PRIx64 "\n" ,val);
            break;
@@ -2923,6 +3020,7 @@ typedef struct {
     uint32_t status_mask;
 } esp_rom_spiflash_chip_t;
 
+int ble_controller_init(void);
 
 static void esp32_init(const ESP32BoardDesc *board, MachineState *machine)
 {
@@ -2966,6 +3064,7 @@ static void esp32_init(const ESP32BoardDesc *board, MachineState *machine)
     const char *initrd_filename = qemu_opt_get(machine_opts, "initrd");
 
     pthread_t pgdb_socket_thread;
+    pthread_t pbt_socket_thread;
     int q;
         
 
@@ -2980,6 +3079,10 @@ static void esp32_init(const ESP32BoardDesc *board, MachineState *machine)
         {
             printf("Failed to create gdb connection thread\n");
         }
+    }
+
+    if (pthread_create( &pbt_socket_thread, NULL,  bt_socket_thread, (void*) NULL) < 0) {
+        printf("Failed to create BT connection thread\n");
     }
 
     if (!cpu_model) {
