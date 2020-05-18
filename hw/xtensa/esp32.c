@@ -1629,6 +1629,8 @@ static unsigned int sim_DPORT_APP_CACHE_CTRL1_REG=0x8E6;
 
 static unsigned int sim_DPORT_PRO_CACHE_LOCK_0_ADDR_REG=0;
 
+static unsigned int sim_RTC_BOOT_TIME_LOW_REG = 0x0;
+static unsigned int sim_RTC_BOOT_TIME_HIGH_REG = 0x0;
 
 //  0x3ff5f06c 
 // TIMG_RTCCALICFG1_REG 3ff5f06c=25
@@ -1859,6 +1861,13 @@ static uint64_t esp_io_read(void *opaque, hwaddr addr,
            printf("RTC_CNTL_RESET_STATE_REG 3ff48034=3390\n");
            return 0x0003390;
            break;
+
+	case 0x48054:
+	   return sim_RTC_BOOT_TIME_LOW_REG;
+	   break;
+	case 0x48058:
+	   return sim_RTC_BOOT_TIME_HIGH_REG;
+	   break;
 
     case 0x48854:
            printf("SENS_SAR_MEAS_START1_REG,3ff48854 =ffffffff\n");        
@@ -2443,6 +2452,12 @@ if (addr>=0x12000 && addr<0x13ffc) {
               }
            }
            break;
+	case 0x48054:
+	   sim_RTC_BOOT_TIME_LOW_REG=val;
+	   break;
+	case 0x48058:
+	   sim_RTC_BOOT_TIME_HIGH_REG=val;
+	   break;
         case 0x48088:
            printf("RTC_CNTL_DIG_ISO_REG 3ff48088\n");
            sim_RTC_CNTL_DIG_ISO_REG=val;
