@@ -2897,8 +2897,8 @@ static void esp_wifi_write(void *opaque, hwaddr addr,
             gdb_serial[2]->gdb_serial_data[gdb_serial[2]->gdb_serial_buff_tx%MAX_GDB_BUFF]=(char)val;
             gdb_serial[2]->gdb_serial_buff_tx++;
         }
-        int tmp=val;
-        fprintf(stderr,"%c",tmp);
+        //int tmp=val;
+        //fprintf(stderr,"%c",tmp);
     } else {
         printf("wifi write %" PRIx64 ",%" PRIx64 " \n",addr,val);
     }
